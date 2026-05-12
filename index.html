@@ -911,6 +911,27 @@
     font-size: 10px; letter-spacing: 0.2em; color: var(--text-dim);
   }
 
+  .popover-divider {
+    margin: 12px 0;
+    border-top: 1px solid var(--border);
+  }
+  .sync-label {
+    font-size: 10px; letter-spacing: 0.2em; color: var(--text-faint);
+    margin-bottom: 8px;
+  }
+  .sync-btns {
+    display: flex; gap: 8px;
+  }
+  .sync-btns .btn {
+    flex: 1; justify-content: center;
+  }
+  .btn.overwrite {
+    border-color: var(--hot); color: var(--hot);
+  }
+  .btn.overwrite:hover {
+    background: var(--hot-glow);
+  }
+
   /* ===== TOASTS ===== */
   .toasts {
     position: fixed; bottom: calc(var(--safe-bottom) + 20px); left: 50%; transform: translateX(-50%);
@@ -1004,6 +1025,12 @@
           <div class="popover-hint">
             Key is stored locally. Direct browser→Anthropic. Required for AI card generation.
             <br/>Model: <b style="color:var(--violet)">claude-haiku-4-5</b>
+          </div>
+          <div class="popover-divider"></div>
+          <div class="sync-label">// DATA SYNC</div>
+          <div class="sync-btns">
+            <button class="btn small ghost" id="exportBtn">↓ EXPORT</button>
+            <button class="btn small ghost" id="importBtn">↑ IMPORT</button>
           </div>
         </div>
       </div>
@@ -1263,6 +1290,24 @@
   </div>
 </div>
 
+<!-- Hidden file input for import -->
+<input type="file" id="importFile" accept=".json" style="display:none;" />
+
+<!-- Import confirm modal -->
+<div class="modal-backdrop" id="importModal">
+  <div class="modal">
+    <div class="modal-h">// DATA IMPORT</div>
+    <div class="modal-body">
+      <div id="importInfo" style="font-size:12px; color:var(--text-dim); line-height:1.8;"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small ghost" id="importCancel">CANCEL</button>
+      <button class="btn small ghost" id="importMerge">MERGE</button>
+      <button class="btn small overwrite" id="importOverwrite">OVERWRITE</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toasts -->
 <div class="toasts" id="toasts"></div>
 
@@ -1453,6 +1498,113 @@ function updateApiStatus() {
     apiStat.textContent = 'KEY NOT SET';
   }
 }
+
+// ============================================================
+// EXPORT / IMPORT
+// ============================================================
+const importFile    = document.getElementById('importFile');
+const importModal   = document.getElementById('importModal');
+const importInfo    = document.getElementById('importInfo');
+const importCancel  = document.getElementById('importCancel');
+const importMerge   = document.getElementById('importMerge');
+const importOverwrite = document.getElementById('importOverwrite');
+let pendingImport = null;
+
+// EXPORT — bundle subjects, cards, tasks into a JSON file download
+document.getElementById('exportBtn').addEventListener('click', () => {
+  const payload = {
+    axiom_export: true,
+    version: 1,
+    exported: new Date().toISOString(),
+    subjects: state.subjects,
+    cards:    state.cards,
+    tasks:    state.tasks,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  const date = new Date().toISOString().slice(0,10);
+  a.href     = url;
+  a.download = `axiom-backup-${date}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  settingsPop.classList.remove('show');
+  toast('// DATA EXPORTED', 'ok');
+});
+
+// IMPORT — open file picker
+document.getElementById('importBtn').addEventListener('click', () => {
+  importFile.value = '';
+  importFile.click();
+  settingsPop.classList.remove('show');
+});
+
+importFile.addEventListener('change', () => {
+  const file = importFile.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.axiom_export) { toast('// INVALID FILE', 'error'); return; }
+      pendingImport = data;
+      const sCount = (data.subjects || []).length;
+      const cCount = (data.cards    || []).length;
+      const tCount = (data.tasks    || []).length;
+      const exported = data.exported
+        ? new Date(data.exported).toLocaleDateString()
+        : 'unknown date';
+      importInfo.innerHTML =
+        `File: <b style="color:var(--violet)">${file.name}</b><br>` +
+        `Exported: ${exported}<br><br>` +
+        `Contains: <b>${sCount}</b> subjects · <b>${cCount}</b> cards · <b>${tCount}</b> tasks<br><br>` +
+        `<b>MERGE</b> — adds new items, keeps existing ones.<br>` +
+        `<b>OVERWRITE</b> — replaces all your data with the file.`;
+      importModal.classList.add('show');
+    } catch (err) {
+      toast('// COULD NOT PARSE FILE', 'error');
+    }
+  };
+  reader.readAsText(file);
+});
+
+importCancel.addEventListener('click', () => {
+  importModal.classList.remove('show');
+  pendingImport = null;
+});
+
+importMerge.addEventListener('click', () => {
+  if (!pendingImport) return;
+  const d = pendingImport;
+  // Merge by id — only add items that don't already exist
+  const existSubIds  = new Set(state.subjects.map(x => x.id));
+  const existCardIds = new Set(state.cards.map(x => x.id));
+  const existTaskIds = new Set(state.tasks.map(x => x.id));
+  let added = 0;
+  (d.subjects || []).forEach(s => { if (!existSubIds.has(s.id))  { state.subjects.push(s); added++; } });
+  (d.cards    || []).forEach(c => { if (!existCardIds.has(c.id)) { state.cards.push(c);    added++; } });
+  (d.tasks    || []).forEach(t => { if (!existTaskIds.has(t.id)) { state.tasks.push(t);    added++; } });
+  persistAll();
+  renderAll();
+  importModal.classList.remove('show');
+  pendingImport = null;
+  toast(`// MERGED — ${added} NEW ITEMS`, 'ok');
+});
+
+importOverwrite.addEventListener('click', () => {
+  if (!pendingImport) return;
+  const d = pendingImport;
+  state.subjects = d.subjects || [];
+  state.cards    = d.cards    || [];
+  state.tasks    = d.tasks    || [];
+  state.activeSub  = state.subjects[0]?.id || null;
+  state.filterSub  = null;
+  persistAll();
+  renderAll();
+  importModal.classList.remove('show');
+  pendingImport = null;
+  toast('// DATA OVERWRITTEN', 'ok');
+});
 
 // ============================================================
 // SUBJECT MODAL
