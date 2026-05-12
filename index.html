@@ -911,6 +911,60 @@
     font-size: 10px; letter-spacing: 0.2em; color: var(--text-dim);
   }
 
+  /* ===== IMAGE ATTACH ZONE ===== */
+  .img-zone {
+    margin: 10px 0 0;
+    border: 1px dashed var(--border);
+    border-radius: 2px;
+    cursor: pointer;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .img-zone:hover { border-color: var(--violet); }
+  .img-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 14px;
+    color: var(--text-faint);
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    text-align: center;
+  }
+  .img-placeholder svg { width: 20px; height: 20px; }
+  .img-placeholder-hint { font-size: 10px; opacity: 0.55; letter-spacing: 0.08em; }
+  .img-preview-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+  .img-preview-row img {
+    width: 56px; height: 56px;
+    object-fit: cover;
+    border: 1px solid var(--border-strong);
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .img-preview-meta {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .img-preview-name {
+    font-size: 11px;
+    color: var(--violet);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .img-preview-dims { font-size: 10px; color: var(--text-faint); }
+
   .popover-divider {
     margin: 12px 0;
     border-top: 1px solid var(--border);
@@ -1074,6 +1128,28 @@
             <div class="panel-meta"><span id="sourceCharCount">0</span> CH</div>
           </div>
           <textarea class="input-source" id="sourceText" placeholder="// PASTE SOURCE TEXT&#10;// notes, lecture transcript, textbook excerpt, etc.&#10;// claude will distill into flashcard pairs"></textarea>
+
+          <!-- Image attach zone -->
+          <div class="img-zone" id="imgZone">
+            <div id="imgPlaceholder" class="img-placeholder">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                <circle cx="12" cy="13" r="4"/>
+              </svg>
+              // ATTACH IMAGE
+              <span class="img-placeholder-hint">photo, scan, screenshot of notes</span>
+            </div>
+            <div id="imgPreviewRow" class="img-preview-row hidden">
+              <img id="imgThumb" alt="preview" />
+              <div class="img-preview-meta">
+                <div class="img-preview-name" id="imgName">—</div>
+                <div class="img-preview-dims" id="imgDims">—</div>
+              </div>
+              <button class="btn small ghost" id="imgClear" style="flex-shrink:0;">✕ CLEAR</button>
+            </div>
+          </div>
+          <input type="file" id="imgInput" accept="image/*" style="display:none;" />
+
           <div class="gen-controls">
             <div class="gen-stats">DENSITY <b id="estCount">~5-15</b> PAIRS</div>
             <button class="btn primary" id="genBtn">
@@ -1349,6 +1425,7 @@ let state = {
   newPrio: 'med',
   pendingGen: null,
   quiz: null,
+  attachedImage: null,
 };
 
 // (no seed data — start clean)
@@ -1753,12 +1830,18 @@ sourceText.addEventListener('input', () => {
 
 genBtn.addEventListener('click', async () => {
   const text = sourceText.value.trim();
-  if (text.length < 30) { toast('SOURCE TEXT TOO SHORT', 'error'); return; }
+  const hasImage = !!state.attachedImage;
+  const hasText = text.length >= 30;
+
+  if (!hasImage && !hasText) { toast('ADD TEXT OR ATTACH AN IMAGE', 'error'); return; }
+  if (!hasImage && text.length < 30) { toast('SOURCE TEXT TOO SHORT', 'error'); return; }
   if (!state.apiKey) { toast('API KEY REQUIRED — OPEN SETTINGS', 'error'); settingsPop.classList.add('show'); return; }
 
   showLoading(true);
   try {
-    const cards = await generateCards(text);
+    const cards = hasImage
+      ? await generateCardsFromImage(state.attachedImage.base64, state.attachedImage.mediaType, hasText ? text : '')
+      : await generateCards(text);
     if (!cards.length) throw new Error('No cards returned');
     state.pendingGen = cards.map(c => ({ ...c, checked: true, _id: uid('g') }));
     renderGenPreview();
@@ -1768,6 +1851,115 @@ genBtn.addEventListener('click', async () => {
     showLoading(false);
   }
 });
+
+// ============================================================
+// IMAGE ATTACH
+// ============================================================
+const imgZone    = document.getElementById('imgZone');
+const imgInput   = document.getElementById('imgInput');
+const imgThumb   = document.getElementById('imgThumb');
+const imgName    = document.getElementById('imgName');
+const imgDims    = document.getElementById('imgDims');
+const imgPreviewRow  = document.getElementById('imgPreviewRow');
+const imgPlaceholder = document.getElementById('imgPlaceholder');
+
+imgZone.addEventListener('click', e => {
+  if (e.target.closest('#imgClear')) return;
+  imgInput.value = '';
+  imgInput.click();
+});
+document.getElementById('imgClear').addEventListener('click', e => {
+  e.stopPropagation();
+  clearAttachedImage();
+});
+
+imgInput.addEventListener('change', async () => {
+  const file = imgInput.files[0];
+  if (!file) return;
+  try {
+    const result = await resizeImage(file);
+    state.attachedImage = result;
+    imgThumb.src = 'data:' + result.mediaType + ';base64,' + result.base64;
+    imgName.textContent = file.name;
+    imgDims.textContent = `${result.w} × ${result.h} px`;
+    imgPlaceholder.classList.add('hidden');
+    imgPreviewRow.classList.remove('hidden');
+  } catch (err) {
+    toast('COULD NOT LOAD IMAGE', 'error');
+  }
+});
+
+function clearAttachedImage() {
+  state.attachedImage = null;
+  imgInput.value = '';
+  imgThumb.src = '';
+  imgPlaceholder.classList.remove('hidden');
+  imgPreviewRow.classList.add('hidden');
+}
+
+function resizeImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load failed')); };
+    img.onload = () => {
+      const MAX = 1568;
+      let w = img.width, h = img.height;
+      if (w > MAX || h > MAX) {
+        const scale = MAX / Math.max(w, h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      resolve({ base64: dataUrl.split(',')[1], mediaType: 'image/jpeg', w, h });
+    };
+    img.src = url;
+  });
+}
+
+async function generateCardsFromImage(base64, mediaType, extraText) {
+  const sys = "You are a flashcard generator. Analyze the image (notes, textbook, slides, handwriting) and generate between 5 and 15 concise flashcard pairs. Respond ONLY with a valid JSON array, no markdown, no explanation. Format: [{\"question\":\"...\",\"answer\":\"...\"}]";
+  const textPart = extraText
+    ? 'Generate flashcards from this image. Extra context: ' + extraText
+    : 'Generate flashcards from this image.';
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': state.apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2048,
+      system: sys,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+          { type: 'text', text: textPart },
+        ],
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('HTTP ' + res.status + (body ? ' — ' + body.slice(0, 80) : ''));
+  }
+  const data = await res.json();
+  const txt = (data.content && data.content[0] && data.content[0].text) || '';
+  let clean = txt.trim().replace(/^```(json)?/i, '').replace(/```$/, '').trim();
+  const a = clean.indexOf('['), b = clean.lastIndexOf(']');
+  if (a >= 0 && b > a) clean = clean.slice(a, b + 1);
+  const arr = JSON.parse(clean);
+  return arr.filter(x => x && x.question && x.answer)
+            .map(x => ({ question: String(x.question), answer: String(x.answer) }));
+}
 
 function showLoading(on) {
   document.getElementById('genLoading').classList.toggle('hidden', !on);
@@ -1850,6 +2042,7 @@ document.getElementById('genSave').addEventListener('click', () => {
   document.getElementById('genPreview').classList.add('hidden');
   sourceText.value = '';
   sourceCharCount.textContent = '0';
+  clearAttachedImage();
   persistAll(); renderAll();
   toast(`+ ${toAdd.length} CARDS COMMITTED`, 'ok');
 });
