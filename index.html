@@ -1201,6 +1201,10 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="6 4 20 12 6 20 6 4" fill="currentColor"/></svg>
               INITIATE QUIZ
             </button>
+            <button class="btn large" id="pdfExportBtn" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              EXPORT PDF
+            </button>
           </div>
         </div>
       </div>
@@ -1779,6 +1783,7 @@ function renderLib() {
   const cards = cardsForSub(state.activeSub);
   document.getElementById('libCount').textContent = cards.length;
   document.getElementById('quizBtn').disabled = cards.length === 0;
+  document.getElementById('pdfExportBtn').disabled = cards.length === 0;
 
   if (cards.length === 0) {
     list.innerHTML = `<div class="empty">
@@ -1814,6 +1819,213 @@ function renderLib() {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 }
+
+// ============================================================
+// PDF EXPORT  —  self-contained, no external libraries
+// Exports the active subject's cards as a German Q&A document.
+// ============================================================
+(function () {
+  // Helvetica glyph widths (1/1000 em) for WinAnsi codes 32..126
+  const HW = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+  // widths for selected non-ASCII glyphs, keyed by Unicode code point
+  const HW_HI = { 0x2018:222,0x2019:222,0x201C:333,0x201D:333,0x201A:222,0x201E:333,0x2013:556,0x2014:1000,0x2022:350,0x2026:1000,0x20AC:556,0xA0:278,0xB7:278,0xAB:556,0xBB:556,0xC4:667,0xD6:778,0xDC:722,0xE4:556,0xF6:556,0xFC:556,0xDF:556 };
+  // Unicode -> WinAnsi byte for the 0x80..0x9F block
+  const W80 = { 0x20AC:0x80,0x201A:0x82,0x0192:0x83,0x201E:0x84,0x2026:0x85,0x2020:0x86,0x2021:0x87,0x02C6:0x88,0x2030:0x89,0x0160:0x8A,0x2039:0x8B,0x0152:0x8C,0x017D:0x8E,0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,0x02DC:0x98,0x2122:0x99,0x0161:0x9A,0x203A:0x9B,0x0153:0x9C,0x017E:0x9E,0x0178:0x9F };
+
+  function cpWidth(cp) {
+    if (cp >= 32 && cp <= 126) return HW[cp - 32];
+    if (HW_HI[cp] != null) return HW_HI[cp];
+    if (cp >= 0xC0 && cp <= 0xFF) return 611;
+    return 556;
+  }
+  function textWidth(str, size) {
+    let w = 0;
+    for (const ch of String(str)) w += cpWidth(ch.codePointAt(0));
+    return w / 1000 * size;
+  }
+  // JS string -> array of WinAnsi byte values (unrepresentable chars become '?')
+  function toWinAnsi(str) {
+    const out = [];
+    for (const ch of String(str)) {
+      let cp = ch.codePointAt(0);
+      if (cp === 9) cp = 32;
+      if (cp < 32) continue;
+      if (cp < 127) { out.push(cp); continue; }
+      if (cp === 127) { out.push(63); continue; }
+      if (W80[cp] != null) { out.push(W80[cp]); continue; }
+      if (cp >= 0xA0 && cp <= 0xFF) { out.push(cp); continue; }
+      out.push(63);
+    }
+    return out;
+  }
+  function wrapText(str, size, maxW) {
+    const words = String(str == null ? '' : str).split(/\s+/).filter(Boolean);
+    if (!words.length) return [' '];
+    const lines = [];
+    let cur = '';
+    for (let word of words) {
+      if (textWidth(word, size) > maxW) {
+        if (cur) { lines.push(cur); cur = ''; }
+        while (textWidth(word, size) > maxW && word.length > 1) {
+          let cut = word.length;
+          while (cut > 1 && textWidth(word.slice(0, cut), size) > maxW) cut--;
+          lines.push(word.slice(0, cut));
+          word = word.slice(cut);
+        }
+        cur = word;
+        continue;
+      }
+      const trial = cur ? cur + ' ' + word : word;
+      if (textWidth(trial, size) <= maxW) cur = trial;
+      else { if (cur) lines.push(cur); cur = word; }
+    }
+    if (cur) lines.push(cur);
+    return lines.length ? lines : [' '];
+  }
+
+  const fmt = (n) => String(Math.round(n * 1000) / 1000);
+
+  // Turn a page's draw ops into a PDF content-stream byte array.
+  function renderOps(ops) {
+    const out = [];
+    const a = (s) => { for (let i = 0; i < s.length; i++) out.push(s.charCodeAt(i) & 0xff); };
+    for (const op of ops) {
+      if (op.t === 'text') {
+        const c = op.color;
+        a(fmt(c[0]) + ' ' + fmt(c[1]) + ' ' + fmt(c[2]) + ' rg\n');
+        a('BT\n/F1 ' + fmt(op.size) + ' Tf\n' + fmt(op.tc || 0) + ' Tc\n');
+        a('1 0 0 1 ' + fmt(op.x) + ' ' + fmt(op.y) + ' Tm\n(');
+        for (const b of toWinAnsi(op.str)) {
+          if (b === 0x28 || b === 0x29 || b === 0x5C) out.push(0x5C);
+          out.push(b);
+        }
+        a(') Tj\nET\n');
+      } else if (op.t === 'rect') {
+        const c = op.color;
+        a(fmt(c[0]) + ' ' + fmt(c[1]) + ' ' + fmt(c[2]) + ' rg\n');
+        a(fmt(op.x) + ' ' + fmt(op.y) + ' ' + fmt(op.w) + ' ' + fmt(op.h) + ' re\nf\n');
+      }
+    }
+    return out;
+  }
+  // Assemble a complete PDF (Uint8Array) from an array of pages (each = ops array).
+  function buildPdf(pages) {
+    const buf = [];
+    const put = (s) => { for (let i = 0; i < s.length; i++) buf.push(s.charCodeAt(i) & 0xff); };
+    const nObj = 3 + pages.length * 2;
+    const off = new Array(nObj + 1).fill(0);
+    put('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+    const begin = (n) => { off[n] = buf.length; put(n + ' 0 obj\n'); };
+    begin(1); put('<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+    let kids = '';
+    for (let i = 0; i < pages.length; i++) kids += (4 + i * 2) + ' 0 R ';
+    begin(2); put('<< /Type /Pages /Count ' + pages.length + ' /Kids [' + kids.trim() + '] >>\nendobj\n');
+    begin(3); put('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n');
+    for (let i = 0; i < pages.length; i++) {
+      begin(4 + i * 2);
+      put('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ' + (5 + i * 2) + ' 0 R >>\nendobj\n');
+      const cs = renderOps(pages[i]);
+      begin(5 + i * 2);
+      put('<< /Length ' + cs.length + ' >>\nstream\n');
+      for (let k = 0; k < cs.length; k++) buf.push(cs[k]);
+      put('\nendstream\nendobj\n');
+    }
+    const xref = buf.length;
+    put('xref\n0 ' + (nObj + 1) + '\n0000000000 65535 f \n');
+    for (let n = 1; n <= nObj; n++) put(String(off[n]).padStart(10, '0') + ' 00000 n \n');
+    put('trailer\n<< /Size ' + (nObj + 1) + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF');
+    return new Uint8Array(buf);
+  }
+
+  function downloadPdf(bytes, filename) {
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+
+  function exportSubjectPdf() {
+    const sub = subjById(state.activeSub);
+    const cards = sub ? cardsForSub(state.activeSub) : [];
+    if (!sub || !cards.length) { toast('NO CARDS TO EXPORT', 'error'); return; }
+
+    const PW = 595, PH = 842, ML = 54, MR = 54, MT = 58, MB = 58;
+    const CW = PW - ML - MR;
+    const INK = [0.13,0.13,0.16], MUT = [0.45,0.47,0.51], ACC = [0.05,0.43,0.52], RULE = [0.82,0.83,0.86];
+    const pages = [];
+    let ops, y;
+    const addPage = () => { ops = []; pages.push(ops); y = PH - MT; };
+    const T = (x, yy, size, color, tc, str) => ops.push({ t:'text', x:x, y:yy, size:size, color:color, tc:tc, str:str });
+    const Rt = (x, yy, w, h, color) => ops.push({ t:'rect', x:x, y:yy, w:w, h:h, color:color });
+    const para = (str, size, color, lh) => {
+      const parts = String(str == null ? '' : str).split('\n');
+      for (const part of parts) {
+        for (const ln of wrapText(part.trim() === '' ? ' ' : part, size, CW)) {
+          if (y - lh < MB) addPage();
+          T(ML, y, size, color, 0, ln);
+          y -= lh;
+        }
+      }
+    };
+    addPage();
+
+    // header (first page only)
+    T(ML, y, 8.5, ACC, 1.7, 'AXIOM   //   LERNKARTEN');
+    y -= 30;
+    for (const ln of wrapText(sub.name, 21, CW)) { T(ML, y, 21, INK, 0, ln); y -= 26; }
+    y -= 1;
+    const now = new Date();
+    const ds = pad2(now.getDate()) + '.' + pad2(now.getMonth() + 1) + '.' + now.getFullYear();
+    T(ML, y, 9, MUT, 0.6, cards.length + ' ' + (cards.length === 1 ? 'KARTE' : 'KARTEN') + '   ·   EXPORTIERT AM ' + ds);
+    y -= 17;
+    Rt(ML, y, CW, 1.3, ACC);
+    y -= 34;
+
+    // one block per card: number, FRAGE, ANTWORT
+    cards.forEach((c, i) => {
+      if (y - 100 < MB) addPage();
+      T(ML, y, 8.5, ACC, 1.5, 'KARTE ' + (i + 1));
+      y -= 18;
+      if (y - 32 < MB) addPage();
+      T(ML, y, 8, MUT, 1.6, 'FRAGE');
+      y -= 14;
+      para(c.q, 11, INK, 15.5);
+      y -= 8;
+      if (y - 32 < MB) addPage();
+      T(ML, y, 8, MUT, 1.6, 'ANTWORT');
+      y -= 14;
+      para(c.a, 11, INK, 15.5);
+      y -= 20;
+      if (i < cards.length - 1) {
+        if (y - 6 < MB) addPage();
+        else { Rt(ML, y, CW, 0.7, RULE); y -= 24; }
+      }
+    });
+
+    // page-number footer on every page
+    const total = pages.length;
+    for (let i = 0; i < total; i++) {
+      pages[i].push({ t:'rect', x:ML, y:46, w:CW, h:0.6, color:RULE });
+      const lab = 'Seite ' + (i + 1) + ' von ' + total;
+      pages[i].push({ t:'text', x:(PW - textWidth(lab, 8)) / 2, y:33, size:8, color:MUT, tc:0, str:lab });
+    }
+
+    const safe = (sub.name || 'Fach').replace(/[^\wÀ-ſ]+/g, '_').replace(/^_+|_+$/g, '') || 'Fach';
+    downloadPdf(buildPdf(pages), 'Lernkarten_' + safe + '_' + now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate()) + '.pdf');
+    toast('// PDF EXPORTED · ' + cards.length + ' CARDS', 'ok');
+  }
+
+  document.getElementById('pdfExportBtn').addEventListener('click', () => {
+    try { exportSubjectPdf(); }
+    catch (e) { console.error(e); toast('// PDF EXPORT FAILED', 'error'); }
+  });
+})();
 
 // ============================================================
 // GENERATE (Claude API)
