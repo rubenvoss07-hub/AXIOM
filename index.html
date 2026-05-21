@@ -1327,7 +1327,7 @@
 
   <!-- end screen -->
   <div class="quiz-stage end-screen hidden" id="endScreen">
-    <div class="end-pct">// SESSION COMPLETE</div>
+    <div class="end-pct" id="endHeading">// SESSION COMPLETE</div>
     <div class="end-score" id="endScore">0%</div>
     <div class="end-pct" id="endLabel">— ACCURACY —</div>
     <div class="end-stats">
@@ -1337,6 +1337,10 @@
     </div>
     <div class="end-actions">
       <button class="btn ghost" id="endExit">EXIT</button>
+      <button class="btn primary hidden" id="endRevise">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        REVISE <span id="endReviseCount">0</span>
+      </button>
       <button class="btn primary" id="endRetry">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         RETRY
@@ -2075,22 +2079,41 @@ document.getElementById('quizBtn').addEventListener('click', startQuiz);
 document.getElementById('quizClose').addEventListener('click', exitQuiz);
 document.getElementById('endExit').addEventListener('click', exitQuiz);
 document.getElementById('endRetry').addEventListener('click', () => startQuiz());
+document.getElementById('endRevise').addEventListener('click', reviseQuiz);
 
 function startQuiz() {
   const cards = cardsForSub(state.activeSub);
   if (!cards.length) return;
-  const sub = subjById(state.activeSub);
   state.quiz = {
-    cards: [...cards].sort(() => Math.random() - 0.5),
+    roundCards: [],
     idx: 0,
     correct: 0,
     wrong: 0,
-    sub,
+    notYetCorrect: [],
+    round: 0,
+    sub: subjById(state.activeSub),
   };
-  document.getElementById('quizTitle').textContent = `// ${sub.name}`;
+  quizOverlay.classList.add('show');
+  beginRound([...cards]);
+}
+
+// Phase-6 style: replay only the cards still answered incorrectly.
+function reviseQuiz() {
+  if (!state.quiz || !state.quiz.notYetCorrect.length) return;
+  beginRound([...state.quiz.notYetCorrect]);
+}
+
+function beginRound(cards) {
+  const q = state.quiz;
+  q.round++;
+  q.roundCards = cards.sort(() => Math.random() - 0.5);
+  q.idx = 0;
+  q.correct = 0;
+  q.wrong = 0;
+  document.getElementById('quizTitle').textContent =
+    q.round === 1 ? `// ${q.sub.name}` : `// ${q.sub.name} · REVISION ${q.round - 1}`;
   endScreen.classList.add('hidden');
   quizStage.classList.remove('hidden');
-  quizOverlay.classList.add('show');
   renderQuizCard();
 }
 
@@ -2102,15 +2125,16 @@ function exitQuiz() {
 
 function renderQuizCard() {
   const q = state.quiz;
-  if (q.idx >= q.cards.length) { showEnd(); return; }
-  const c = q.cards[q.idx];
+  if (q.idx >= q.roundCards.length) { showEnd(); return; }
+  const c = q.roundCards[q.idx];
   faceQ.textContent = c.q;
   faceA.textContent = c.a;
   flashcard.classList.remove('flipped');
+  quizActions.classList.remove('hidden');
   quizActions.style.visibility = 'hidden';
   tapHint.style.opacity = '1';
-  document.getElementById('quizCount').textContent = `${String(q.idx+1).padStart(2,'0')} / ${String(q.cards.length).padStart(2,'0')}`;
-  document.getElementById('quizProgressFill').style.width = `${(q.idx / q.cards.length) * 100}%`;
+  document.getElementById('quizCount').textContent = `${String(q.idx+1).padStart(2,'0')} / ${String(q.roundCards.length).padStart(2,'0')}`;
+  document.getElementById('quizProgressFill').style.width = `${(q.idx / q.roundCards.length) * 100}%`;
 }
 
 flashcard.addEventListener('click', () => {
@@ -2126,27 +2150,42 @@ document.getElementById('quizWrong').addEventListener('click', () => grade(false
 
 function grade(correct) {
   const q = state.quiz;
-  if (correct) q.correct++; else q.wrong++;
+  const card = q.roundCards[q.idx];
+  if (correct) {
+    q.correct++;
+    const i = q.notYetCorrect.indexOf(card);
+    if (i !== -1) q.notYetCorrect.splice(i, 1);
+  } else {
+    q.wrong++;
+    if (!q.notYetCorrect.includes(card)) q.notYetCorrect.push(card);
+  }
   q.idx++;
-  // small delay to feel responsive
   renderQuizCard();
-  document.getElementById('quizProgressFill').style.width = `${(q.idx / q.cards.length) * 100}%`;
 }
 
 function showEnd() {
   const q = state.quiz;
-  const total = q.cards.length;
-  const pct = total ? Math.round((q.correct / total) * 100) : 0;
+  const roundTotal = q.roundCards.length;
+  const pct = roundTotal ? Math.round((q.correct / roundTotal) * 100) : 0;
+  const remaining = q.notYetCorrect.length;
+
   document.getElementById('endScore').textContent = pct + '%';
   document.getElementById('endCorrect').textContent = q.correct;
   document.getElementById('endWrong').textContent = q.wrong;
-  document.getElementById('endTotal').textContent = total;
-  let label = '— ACCURACY —';
-  if (pct >= 90) label = '// MASTERY ACHIEVED';
-  else if (pct >= 70) label = '// SOLID RECALL';
-  else if (pct >= 50) label = '// REVIEW RECOMMENDED';
-  else label = '// REINFORCEMENT NEEDED';
+  document.getElementById('endTotal').textContent = roundTotal;
+
+  let label;
+  if (remaining > 0) label = `// ${remaining} NOT YET CORRECT`;
+  else if (q.round === 1) label = '// MASTERY ACHIEVED';
+  else label = '// ALL CARDS CLEARED';
   document.getElementById('endLabel').textContent = label;
+  document.getElementById('endHeading').textContent = remaining > 0 ? '// ROUND COMPLETE' : '// SESSION COMPLETE';
+
+  document.getElementById('endReviseCount').textContent = remaining;
+  document.getElementById('endRevise').classList.toggle('hidden', remaining === 0);
+  document.getElementById('endRetry').classList.toggle('hidden', remaining > 0);
+
+  quizActions.classList.add('hidden');
   quizStage.classList.add('hidden');
   endScreen.classList.remove('hidden');
 }
